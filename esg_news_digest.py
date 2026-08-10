@@ -6,11 +6,12 @@
   - 双模式信源：RSS（国际组织）+ 网页栏目解析（国内政府/媒体，均无标准 RSS）
   - 关键词命中即筛，并自动给出"业务落点"（对应手册角度库）
   - 一键推送到企业微信机器人（push_to_wecom）
+  - 可选：设了 LLM_API_KEY 后，自动为 Top3 热点生成「视频钩子」
 
 用法：
-  1) 把企业微信群机器人 Webhook 填到下方 WEBHOOK
+  1) 把企业微信群机器人 Webhook 填到下方 WEBHOOK（或用 GitHub Secrets 注入）
   2) python3 esg_news_digest.py
-  3) 用 crontab / 云函数 设置每日 09:00 自动运行（见文件底部部署说明）
+  3) 用 GitHub Actions / 云函数 设置每日 09:00 自动运行（见文件底部部署说明）
 """
 import json
 import os
@@ -20,36 +21,30 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 # ===== 企业微信推送配置 =====
-# 优先读取环境变量 WEBHOOK（GitHub Actions / 云函数部署时用 Secret 注入，密钥不写进代码）
-# 本地手动测试也可临时设置：export WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
 WEBHOOK = os.environ.get("WEBHOOK", "")
 
 # ===== 信源（已联网核实）=====
-# kind: "rss"  = 标准 RSS/Atom 订阅源（国际组织）
-#       "html" = 栏目列表页（国内政府/媒体多数无 RSS，解析 <a> 标题）
 SOURCES = [
-    # —— 国际（RSS，已实测可用）——
     {"name": "IPCC", "url": "https://www.ipcc.ch/feed/", "kind": "rss"},
-
-    # —— 国内政府/媒体（网页栏目，已核实为文章列表页）——
     {"name": "中国政府网·要闻", "url": "https://www.gov.cn/yaowen", "kind": "html"},
     {"name": "生态环境部·环境要闻", "url": "https://www.mee.gov.cn/xxgk/hjyw/", "kind": "html"},
     {"name": "财新网", "url": "https://www.caixin.com/", "kind": "html"},
     {"name": "21世纪经济报道", "url": "https://www.21jingji.com/", "kind": "html"},
-
-    # —— 备选（如本地网络可访问，取消注释启用）——
+    # —— 上市公司 ESG 公告（部分站点为 JS 渲染，抓不到会自动跳过，可后续调整）——
+    {"name": "上交所·新闻", "url": "https://www.sse.com.cn/news/", "kind": "html"},
+    {"name": "深交所·公告", "url": "https://www.szse.cn/disclosure/listed/bulletin/index.html", "kind": "html"},
+    {"name": "北交所·披露", "url": "https://www.bse.cn/disclosure.html", "kind": "html"},
     # {"name": "UNFCCC 新闻", "url": "https://unfccc.int/news", "kind": "html"},
-    # {"name": "上交所·新闻", "url": "https://www.sse.com.cn/aboutus/mediacenter/", "kind": "html"},
 ]
 
-# ===== 选题关键词（对应你的三块业务）=====
 KEYWORDS = ["双碳", "碳达峰", "碳中和", "碳市场", "碳排放", "碳核算", "碳关税", "CBAM",
             "ESG", "可持续发展", "披露", "绿色", "减排", "碳汇", "生物多样性",
-            "生态保护", "湿地", "红树林", "绿色金融", "绿电", "应对气候变化"]
+            "生态保护", "湿地", "红树林", "绿色金融", "绿电", "应对气候变化",
+            "可持续发展报告", "ESG报告", "社会责任报告", "绿色债券", "环境信息"]
 
-# 关键词 -> 业务落点（自动建议，对应手册"角度库"）
 ANGLE_MAP = {
     "碳核算": "对你企业的影响：现在就要建碳数据台账",
     "碳排放": "对你企业的影响：摸清范围 1/2/3 排放",
@@ -60,12 +55,14 @@ ANGLE_MAP = {
     "碳汇": "看得见的变化：生态价值变现的新玩法",
     "湿地": "看得见的变化：生态修复与碳汇金融",
     "生物多样性": "生态故事：企业可参与的保护行动",
+    "可持续发展报告": "同行怎么做：领先企业 ESG 披露范本",
+    "ESG报告": "同行怎么做：强制披露下领先企业的作业",
+    "社会责任报告": "同行怎么做：ESG 披露范式参考",
+    "绿色债券": "看得见的变化：绿色金融新工具",
 }
 
-WINDOW_DAYS = 3  # 仅 RSS 源按近 N 天过滤；网页源默认取最新列表
+WINDOW_DAYS = 3
 
-
-# ---------- 网络获取（容忍证书问题）----------
 def fetch(url, timeout=12):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -75,8 +72,6 @@ def fetch(url, timeout=12):
         raw = r.read()
     return raw.decode("utf-8", errors="ignore")
 
-
-# ---------- RSS / Atom 解析 ----------
 def parse_rss(xml_text):
     items = []
     try:
@@ -113,8 +108,6 @@ def parse_date(s):
             continue
     return None
 
-
-# ---------- 网页栏目解析 ----------
 class AnchorParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -145,8 +138,6 @@ def parse_html_anchors(html_text):
         pass
     return p.anchors
 
-
-# ---------- 主流程 ----------
 def collect():
     now = datetime.now()
     cutoff = now - timedelta(days=WINDOW_DAYS)
@@ -169,19 +160,16 @@ def collect():
                 if dt and dt < cutoff:
                     continue
                 link = it["link"]
-                if link and link.startswith("/"):
-                    link = url.rstrip("/") + link
+                if link:
+                    link = urljoin(url, link)
                 hits.append(_make(name, it["title"], link, matched))
-        else:  # html 栏目页
+        else:
             for title, href in parse_html_anchors(raw):
                 matched = [k for k in KEYWORDS if k in title]
                 if not matched:
                     continue
-                link = href
-                if link and link.startswith("/"):
-                    link = url.rstrip("/") + link
+                link = urljoin(url, href) if href else ""
                 hits.append(_make(name, title, link, matched))
-    # 去重
     seen, uniq = set(), []
     for h in hits:
         if h["title"] in seen:
@@ -193,13 +181,10 @@ def _make(src, title, link, matched):
     angle = "; ".join(ANGLE_MAP.get(k, "") for k in matched if k in ANGLE_MAP)
     return {"src": src, "title": title, "link": link, "kw": matched, "angle": angle}
 
-
-# ---------- 企业微信推送 ----------
 def push_to_wecom(webhook, markdown):
     if not webhook:
         print("[未推送] 未配置 WEBHOOK，仅本地输出")
         return None
-    # 企业微信 markdown 限制 4096 字节，超出截断
     payload = {"msgtype": "markdown", "markdown": {"content": markdown[:4000]}}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(webhook, data=data,
@@ -211,6 +196,44 @@ def push_to_wecom(webhook, markdown):
         print(f"[推送失败] {e}")
         return None
 
+# ---------- AI 视频钩子（可选，设了 LLM_API_KEY 才生效）----------
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL") or "https://api.openai.com/v1"
+LLM_MODEL = os.environ.get("LLM_MODEL") or "gpt-4o-mini"
+
+def llm_complete(prompt):
+    url = LLM_BASE_URL.rstrip("/") + "/chat/completions"
+    data = {"model": LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.8}
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LLM_API_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[LLM失败] {e}")
+        return ""
+
+def generate_hooks(hits, top_n=3):
+    out = []
+    for h in hits[:top_n]:
+        prompt = (
+            "你是短视频内容专家，帮一个做企业碳核算/ESG/生态保护的视频号写脚本。\n"
+            f"热点：{h['title']}\n业务落点：{h.get('angle','')}\n\n"
+            "请只输出三项，简洁口语化：\n"
+            "1) 视频开头3秒口播文案（抓人、像真人说话）\n"
+            "2) 视频标题（带1个emoji，吸引点击）\n"
+            "3) 封面文案（一句话）"
+        )
+        hook = llm_complete(prompt)
+        if hook:
+            out.append((h, hook))
+    return out
 
 def main():
     uniq = collect()
@@ -230,10 +253,13 @@ def main():
         lines.append(""); md_parts.append("")
     out = "\n".join(lines)
     print(out)
+    if LLM_API_KEY:
+        for h, hook in generate_hooks(uniq):
+            md_parts.append(f"> **🎬 视频钩子｜{h['title']}**")
+            md_parts.append(hook)
+            md_parts.append("")
     md = "\n".join(md_parts)
     push_to_wecom(WEBHOOK, md)
 
-
 if __name__ == "__main__":
     main()
-

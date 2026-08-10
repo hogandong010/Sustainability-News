@@ -1,0 +1,22 @@
+name: 每日可持续发展资讯速览
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 运行资讯速览并推送企业微信
+        env:
+          WEBHOOK: ${{ secrets.WEBHOOK }}
+        run: python3 esg_news_digest.py

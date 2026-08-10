@@ -6,7 +6,6 @@
   - 双模式信源：RSS（国际组织）+ 网页栏目解析（国内政府/媒体，均无标准 RSS）
   - 关键词命中即筛，并自动给出"业务落点"（对应手册角度库）
   - 一键推送到企业微信机器人（push_to_wecom）
-  - 可选：设了 LLM_API_KEY 后，自动为 Top3 热点生成「视频钩子」
 
 用法：
   1) 把企业微信群机器人 Webhook 填到下方 WEBHOOK（或用 GitHub Secrets 注入）
@@ -24,27 +23,36 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 # ===== 企业微信推送配置 =====
+# 优先读取环境变量 WEBHOOK（GitHub Actions / 云函数部署时用 Secret 注入，密钥不写进代码）
+# 本地手动测试也可临时设置：export WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
 WEBHOOK = os.environ.get("WEBHOOK", "")
 
 # ===== 信源（已联网核实）=====
+# kind: "rss"  = 标准 RSS/Atom 订阅源（国际组织）
+#       "html" = 栏目列表页（国内政府/媒体多数无 RSS，解析 <a> 标题）
+#       "cninfo" = 巨潮网官方披露接口（上市公司 ESG 公告，覆盖上交所/深交所/北交所）
 SOURCES = [
+    # —— 国际（RSS，已实测可用）——
     {"name": "IPCC", "url": "https://www.ipcc.ch/feed/", "kind": "rss"},
+
+    # —— 国内政府/媒体（网页栏目，已核实为文章列表页）——
     {"name": "中国政府网·要闻", "url": "https://www.gov.cn/yaowen", "kind": "html"},
     {"name": "生态环境部·环境要闻", "url": "https://www.mee.gov.cn/xxgk/hjyw/", "kind": "html"},
     {"name": "财新网", "url": "https://www.caixin.com/", "kind": "html"},
     {"name": "21世纪经济报道", "url": "https://www.21jingji.com/", "kind": "html"},
-    # —— 上市公司 ESG 公告（部分站点为 JS 渲染，抓不到会自动跳过，可后续调整）——
-    {"name": "上交所·新闻", "url": "https://www.sse.com.cn/news/", "kind": "html"},
-    {"name": "深交所·公告", "url": "https://www.szse.cn/disclosure/listed/bulletin/index.html", "kind": "html"},
-    {"name": "北交所·披露", "url": "https://www.bse.cn/disclosure.html", "kind": "html"},
+
+    # —— 上市公司 ESG 公告：巨潮网（证监会官方统一披露平台，一家覆盖上交所/深交所/北交所）——
+    {"name": "巨潮网·上市公司ESG公告", "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query", "kind": "cninfo"},
     # {"name": "UNFCCC 新闻", "url": "https://unfccc.int/news", "kind": "html"},
 ]
 
+# ===== 选题关键词（对应你的三块业务）=====
 KEYWORDS = ["双碳", "碳达峰", "碳中和", "碳市场", "碳排放", "碳核算", "碳关税", "CBAM",
             "ESG", "可持续发展", "披露", "绿色", "减排", "碳汇", "生物多样性",
             "生态保护", "湿地", "红树林", "绿色金融", "绿电", "应对气候变化",
             "可持续发展报告", "ESG报告", "社会责任报告", "绿色债券", "环境信息"]
 
+# 关键词 -> 业务落点（自动建议，对应手册"角度库"）
 ANGLE_MAP = {
     "碳核算": "对你企业的影响：现在就要建碳数据台账",
     "碳排放": "对你企业的影响：摸清范围 1/2/3 排放",
@@ -61,8 +69,21 @@ ANGLE_MAP = {
     "绿色债券": "看得见的变化：绿色金融新工具",
 }
 
-WINDOW_DAYS = 3
+WINDOW_DAYS = 3  # 仅 RSS 源按近 N 天过滤；网页源默认取最新列表
 
+# 巨潮网（cninfo）抓取配置：上市公司 ESG 披露较稀疏，回看 7 天保证覆盖
+# 注意：cninfo 的 keyword 参数是「全文检索」（匹配 PDF 正文，几乎每条都命中），
+# 无法按标题筛选，故本脚本改为「拉取最新公告 + 按标题短语命中」的方式，干净可靠。
+CNINFO_TITLE_PHRASES = ["ESG", "可持续发展报告", "社会责任报告", "绿色债券",
+                        "环境、社会与公司治理", "环境、社会及治理", "ESG报告"]
+CNINFO_WINDOW_DAYS = 7      # 回看天数
+CNINFO_PAGE_SIZE = 30       # 每页条数
+CNINFO_MAX_PAGES = 15       # 最多翻页数（上限，避免请求过多）
+CNINFO_TARGET = 8           # 收集到这么多条命中即提前停止
+CNINFO_API = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
+
+
+# ---------- 网络获取（容忍证书问题）----------
 def fetch(url, timeout=12):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -72,6 +93,8 @@ def fetch(url, timeout=12):
         raw = r.read()
     return raw.decode("utf-8", errors="ignore")
 
+
+# ---------- RSS / Atom 解析 ----------
 def parse_rss(xml_text):
     items = []
     try:
@@ -108,6 +131,8 @@ def parse_date(s):
             continue
     return None
 
+
+# ---------- 网页栏目解析 ----------
 class AnchorParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -138,12 +163,73 @@ def parse_html_anchors(html_text):
         pass
     return p.anchors
 
+
+# ---------- 巨潮网（cninfo）上市公司 ESG 公告接口 ----------
+def _cninfo_ctx():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+def fetch_cninfo():
+    """巨潮网（cninfo）官方披露接口：一家覆盖上交所/深交所/北交所的 ESG 相关公告。
+
+    策略：cninfo 的 keyword 参数是全文检索（几乎每条公告正文都含 ESG，无法按标题筛选），
+    因此这里改为「拉取最近 N 天最新公告，按标题短语命中」——只保留标题里真正出现
+    ESG / 可持续发展报告 / 社会责任报告 等字样的公告，干净无噪声。"""
+    end = datetime.now()
+    start = end - timedelta(days=CNINFO_WINDOW_DAYS)
+    se_date = f"{start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')}"
+    hits, seen_ids = [], set()
+    page = 0
+    while page < CNINFO_MAX_PAGES and len(hits) < CNINFO_TARGET:
+        page += 1
+        body = urllib.parse.urlencode({
+            "pageNum": str(page), "pageSize": str(CNINFO_PAGE_SIZE),
+            "tabName": "全部", "seDate": se_date, "isHL": "false",
+        }).encode("utf-8")
+        req = urllib.request.Request(CNINFO_API, data=body,
+                                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=_cninfo_ctx()) as r:
+                j = json.loads(r.read().decode("utf-8", errors="ignore"))
+        except Exception as e:
+            print(f"[跳过] 巨潮网(第{page}页): {e}")
+            break
+        anns = j.get("announcements") or []
+        if not anns:
+            break
+        for a in anns:
+            aid = str(a.get("announcementId", ""))
+            if aid in seen_ids:
+                continue
+            title = (a.get("announcementTitle") or "").strip()
+            matched = [k for k in CNINFO_TITLE_PHRASES if k in title]
+            if not matched:
+                continue
+            seen_ids.add(aid)
+            sec = (a.get("secName") or "").strip()
+            link = f"http://www.cninfo.com.cn/new/disclosure/detail?announcementId={aid}"
+            disp = f"{sec}：{title}" if sec else title
+            # 用与 KEYWORDS 重合的短语去匹配业务落点
+            angle_kw = [k for k in matched if k in KEYWORDS]
+            hits.append(_make("巨潮网·上市公司ESG公告", disp, link, angle_kw))
+    return hits
+
+
+# ---------- 主流程 ----------
 def collect():
     now = datetime.now()
     cutoff = now - timedelta(days=WINDOW_DAYS)
     hits = []
     for s in SOURCES:
         name, url, kind = s["name"], s["url"], s["kind"]
+        if kind == "cninfo":
+            try:
+                hits.extend(fetch_cninfo())
+            except Exception as e:
+                print(f"[跳过] {name}: {e}")
+            continue
         try:
             raw = fetch(url)
         except Exception as e:
@@ -163,13 +249,14 @@ def collect():
                 if link:
                     link = urljoin(url, link)
                 hits.append(_make(name, it["title"], link, matched))
-        else:
+        else:  # html 栏目页
             for title, href in parse_html_anchors(raw):
                 matched = [k for k in KEYWORDS if k in title]
                 if not matched:
                     continue
                 link = urljoin(url, href) if href else ""
                 hits.append(_make(name, title, link, matched))
+    # 去重
     seen, uniq = set(), []
     for h in hits:
         if h["title"] in seen:
@@ -181,10 +268,13 @@ def _make(src, title, link, matched):
     angle = "; ".join(ANGLE_MAP.get(k, "") for k in matched if k in ANGLE_MAP)
     return {"src": src, "title": title, "link": link, "kw": matched, "angle": angle}
 
+
+# ---------- 企业微信推送 ----------
 def push_to_wecom(webhook, markdown):
     if not webhook:
         print("[未推送] 未配置 WEBHOOK，仅本地输出")
         return None
+    # 企业微信 markdown 限制 4096 字节，超出截断
     payload = {"msgtype": "markdown", "markdown": {"content": markdown[:4000]}}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(webhook, data=data,
@@ -195,6 +285,7 @@ def push_to_wecom(webhook, markdown):
     except Exception as e:
         print(f"[推送失败] {e}")
         return None
+
 
 # ---------- AI 视频钩子（可选，设了 LLM_API_KEY 才生效）----------
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
@@ -235,6 +326,7 @@ def generate_hooks(hits, top_n=3):
             out.append((h, hook))
     return out
 
+
 def main():
     uniq = collect()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -261,5 +353,18 @@ def main():
     md = "\n".join(md_parts)
     push_to_wecom(WEBHOOK, md)
 
+
 if __name__ == "__main__":
     main()
+
+# ===================== 部署说明 =====================
+# 1) 企业微信建群 → 右上角「...」→ 添加群机器人 → 复制 Webhook 填到 WEBHOOK（或用 Secrets 注入）
+# 2) 本机定时（mac/Linux）：
+#      crontab -e
+#      0 9 * * * /usr/bin/python3 /root/esg_news_digest.py >> /root/digest.log 2>&1
+#    Windows：任务计划程序，每日 09:00 触发 python3 esg_news_digest.py
+# 3) 云上（不掉线，推荐）：GitHub Actions（schedule: '0 1 * * *' = 北京时间 09:00）
+#    把本文件部署上去，并在仓库 Secrets 填 WEBHOOK，触发后自动抓取并推送企业微信
+# 4) 注意：企业微信消息可在个人微信里接收（微信→我→设置→通用→辅助功能→微信接收企业微信消息）
+# 5) 扩展开关：UNFCCC 等备选源在 SOURCES 里以注释形式保留；上市公司 ESG 公告已由
+#    巨潮网（cninfo）官方接口统一抓取（覆盖上交所/深交所/北交所）；命中条目也可再喂给大模型写视频钩子

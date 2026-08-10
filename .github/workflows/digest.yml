@@ -19,4 +19,7 @@ jobs:
       - name: 运行资讯速览并推送企业微信
         env:
           WEBHOOK: ${{ secrets.WEBHOOK }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
         run: python3 esg_news_digest.py

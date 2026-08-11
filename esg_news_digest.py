@@ -310,9 +310,27 @@ def llm_complete(prompt):
         print(f"[LLM失败] {e}")
         return ""
 
+# 钩子选题打分：优先挑"对客户最有价值、最适合拍视频"的选题，而不是列表里的前 3 条。
+# 对齐《运营手册》1.2 热点分级：命中核心业务词、能落到客户、来自可拍信源（同行动作/行业动态）的排前面。
+HOOK_PRIORITY_KEYWORDS = ["CBAM", "碳关税", "碳核算", "碳市场", "碳排放", "碳足迹", "范围三",
+                          "双碳", "碳达峰", "碳中和", "ESG", "可持续发展报告",
+                          "社会责任报告", "绿色债券"]
+HOOK_PRIORITY_SOURCES = ["巨潮网·上市公司ESG公告", "财新网", "21世纪经济报道"]
+
+def score_hit(h):
+    s = 0
+    for k in HOOK_PRIORITY_KEYWORDS:
+        if k in h["title"]:
+            s += 3
+    if h["angle"]:          # 能落到"对你的企业意味着什么"——最值钱
+        s += 2
+    if h["src"] in HOOK_PRIORITY_SOURCES:
+        s += 2
+    return s
+
 def generate_hooks(hits, top_n=3):
     out = []
-    for h in hits[:top_n]:
+    for h in sorted(hits, key=score_hit, reverse=True)[:top_n]:
         prompt = (
             "你是短视频内容专家，帮一个做企业碳核算/ESG/生态保护的视频号写脚本。\n"
             f"热点：{h['title']}\n业务落点：{h.get('angle','')}\n\n"
@@ -368,3 +386,4 @@ if __name__ == "__main__":
 # 4) 注意：企业微信消息可在个人微信里接收（微信→我→设置→通用→辅助功能→微信接收企业微信消息）
 # 5) 扩展开关：UNFCCC 等备选源在 SOURCES 里以注释形式保留；上市公司 ESG 公告已由
 #    巨潮网（cninfo）官方接口统一抓取（覆盖上交所/深交所/北交所）；命中条目也可再喂给大模型写视频钩子
+

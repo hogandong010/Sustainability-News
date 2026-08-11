@@ -1,8 +1,11 @@
 name: 每日可持续发展资讯速览
 
+# 触发方式（二选一）：
+# 1) 外部定时器触发（推荐，最准点）：用 cron-job.org 等免费服务，设为北京时间 09:00，
+#    每天自动调用本工作流的 dispatch 接口，比 GitHub 自带定时可靠得多（GitHub 定时常延迟/跳过）。
+# 2) 手动触发：在 GitHub 网页 Actions 标签点「Run workflow」按钮跑一次（用于测试）。
+# 说明：已移除 GitHub 自带 schedule，改由外部定时器稳定触发，避免漏发、也避免重复推送。
 on:
-  schedule:
-    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,12 +15,22 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
       - name: 配置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: 运行资讯速览并推送企业微信
         env:
+          # 密钥从仓库 Secrets 注入，绝不写进代码
+          WEBHOOK: ${{ secrets.WEBHOOK }}
+          # 可选：填了 LLM_API_KEY 才会额外生成「视频钩子」
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: python3 esg_news_digest.py
+
           WEBHOOK: ${{ secrets.WEBHOOK }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}

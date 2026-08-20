@@ -30,7 +30,6 @@ WEBHOOK = os.environ.get("WEBHOOK", "")
 # ===== 信源（已联网核实）=====
 # kind: "rss"  = 标准 RSS/Atom 订阅源（国际组织）
 #       "html" = 栏目列表页（国内政府/媒体多数无 RSS，解析 <a> 标题）
-#       "cninfo" = 巨潮网官方披露接口（上市公司 ESG 公告，覆盖上交所/深交所/北交所）
 SOURCES = [
     # —— 国际（RSS，已实测可用）——
     {"name": "IPCC", "url": "https://www.ipcc.ch/feed/", "kind": "rss"},
@@ -48,6 +47,7 @@ SOURCES = [
 
 # ===== 选题关键词（对应你的三块业务）=====
 KEYWORDS = ["双碳", "碳达峰", "碳中和", "碳市场", "碳排放", "碳核算", "碳关税", "CBAM",
+            "碳边境调节机制", "碳边境", "Carbon Border",
             "ESG", "可持续发展", "披露", "绿色", "减排", "碳汇", "生物多样性",
             "生态保护", "湿地", "红树林", "绿色金融", "绿电", "应对气候变化",
             "可持续发展报告", "ESG报告", "社会责任报告", "绿色债券", "环境信息"]
@@ -68,6 +68,10 @@ ANGLE_MAP = {
     "社会责任报告": "同行怎么做：ESG 披露范式参考",
     "绿色债券": "看得见的变化：绿色金融新工具",
 }
+
+# CBAM / 欧盟碳关税 专项雷达词（含英文，用于把"欧盟有关 CBAM 的最新更新"做成每日常驻内容）
+CBAM_PHRASES = ["CBAM", "碳关税", "碳边境调节机制", "碳边境", "欧盟碳关税",
+                "Carbon Border", "carbon border adjustment"]
 
 WINDOW_DAYS = 3  # 仅 RSS 源按近 N 天过滤；网页源默认取最新列表
 
@@ -266,9 +270,10 @@ def collect():
 
 def _make(src, title, link, matched):
     angle = "; ".join(ANGLE_MAP.get(k, "") for k in matched if k in ANGLE_MAP)
-    return {"src": src, "title": title, "link": link, "kw": matched, "angle": angle}
-
-
+    # 标记为 CBAM 相关（用于每日常驻"欧盟碳关税专区" + 钩子优先）
+    cbam = any(p.lower() in title.lower() for p in CBAM_PHRASES)
+    return {"src": src, "title": title, "link": link, "kw": matched,
+            "angle": angle, "cbam": cbam}
 # ---------- 企业微信推送 ----------
 def push_to_wecom(webhook, markdown):
     if not webhook:
@@ -312,7 +317,7 @@ def llm_complete(prompt):
 
 # 钩子选题打分：优先挑"对客户最有价值、最适合拍视频"的选题，而不是列表里的前 3 条。
 # 对齐《运营手册》1.2 热点分级：命中核心业务词、能落到客户、来自可拍信源（同行动作/行业动态）的排前面。
-HOOK_PRIORITY_KEYWORDS = ["CBAM", "碳关税", "碳核算", "碳市场", "碳排放", "碳足迹", "范围三",
+HOOK_PRIORITY_KEYWORDS = ["CBAM", "碳关税", "碳边境调节机制", "碳边境", "碳核算", "碳市场", "碳排放", "碳足迹", "范围三",
                           "双碳", "碳达峰", "碳中和", "ESG", "可持续发展报告",
                           "社会责任报告", "绿色债券"]
 HOOK_PRIORITY_SOURCES = ["巨潮网·上市公司ESG公告", "财新网", "21世纪经济报道"]
@@ -330,7 +335,10 @@ def score_hit(h):
 
 def generate_hooks(hits, top_n=3):
     out = []
-    for h in sorted(hits, key=score_hit, reverse=True)[:top_n]:
+    # CBAM 优先：保证每日至少 1 条欧盟碳关税钩子（用户要求常驻）
+    cbam_hits = sorted([h for h in hits if h.get("cbam")], key=score_hit, reverse=True)
+    others = sorted([h for h in hits if not h.get("cbam")], key=score_hit, reverse=True)
+    for h in (cbam_hits + others)[:top_n]:
         prompt = (
             "你是短视频内容专家，帮一个做企业碳核算/ESG/生态保护的视频号写脚本。\n"
             f"热点：{h['title']}\n业务落点：{h.get('angle','')}\n\n"
@@ -351,6 +359,8 @@ def main():
     lines = [f"# 可持续发展资讯速览（{today}）", f"近 {WINDOW_DAYS} 天命中 {len(uniq)} 条\n"]
     md_parts = [f"**📌 可持续发展资讯速览（{today}）**", f"> 命中 {len(uniq)} 条\n"]
     for h in uniq:
+        if h.get("cbam"):
+            continue  # CBAM 相关统一进下方"欧盟碳关税专区"，避免重复
         line = f"- **[{h['src']}]** {h['title']}"
         lines.append(line)
         md_parts.append(f"> **[{h['src']}]** {h['title']}")
@@ -361,6 +371,24 @@ def main():
             lines.append(f"  链接：{h['link']}")
             md_parts.append(f"> {h['link']}")
         lines.append(""); md_parts.append("")
+
+    # —— CBAM / 欧盟碳关税 每日常驻专区（无更新也显示，告知持续监测）——
+    cbam_hits = [h for h in uniq if h.get("cbam")]
+    md_parts.append("> **🌍 CBAM / 欧盟碳关税专区（每日常驻）**")
+    lines.append("\n🌍 CBAM / 欧盟碳关税专区（每日常驻）")
+    if cbam_hits:
+        for h in cbam_hits:
+            md_parts.append(f"> **[{h['src']}]** {h['title']}")
+            lines.append(f"- **[{h['src']}]** {h['title']}")
+            if h["link"]:
+                md_parts.append(f"> {h['link']}")
+                lines.append(f"  链接：{h['link']}")
+            md_parts.append("")
+    else:
+        md_parts.append("> （今日无新增欧盟 CBAM 更新，持续监测中）")
+        lines.append("- 今日无新增，持续监测中")
+    md_parts.append("")
+
     out = "\n".join(lines)
     print(out)
     if LLM_API_KEY:
@@ -386,4 +414,5 @@ if __name__ == "__main__":
 # 4) 注意：企业微信消息可在个人微信里接收（微信→我→设置→通用→辅助功能→微信接收企业微信消息）
 # 5) 扩展开关：UNFCCC 等备选源在 SOURCES 里以注释形式保留；上市公司 ESG 公告已由
 #    巨潮网（cninfo）官方接口统一抓取（覆盖上交所/深交所/北交所）；命中条目也可再喂给大模型写视频钩子
+
 

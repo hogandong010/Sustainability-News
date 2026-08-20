@@ -33,6 +33,9 @@ WEBHOOK = os.environ.get("WEBHOOK", "")
 SOURCES = [
     # —— 国际（RSS，已实测可用）——
     {"name": "IPCC", "url": "https://www.ipcc.ch/feed/", "kind": "rss"},
+    # 国际英文媒体（RSS，已实测可达）：拓宽外网/英文视野，覆盖欧盟碳关税、碳市场一手动态
+    {"name": "Climate Home News", "url": "https://www.climatechangenews.com/feed/", "kind": "rss"},
+    {"name": "Carbon Pulse", "url": "https://carbon-pulse.com/feed/", "kind": "rss"},
 
     # —— 国内政府/媒体（网页栏目，已核实为文章列表页）——
     {"name": "中国政府网·要闻", "url": "https://www.gov.cn/yaowen", "kind": "html"},
@@ -50,7 +53,11 @@ KEYWORDS = ["双碳", "碳达峰", "碳中和", "碳市场", "碳排放", "碳�
             "碳边境调节机制", "碳边境", "Carbon Border",
             "ESG", "可持续发展", "披露", "绿色", "减排", "碳汇", "生物多样性",
             "生态保护", "湿地", "红树林", "绿色金融", "绿电", "应对气候变化",
-            "可持续发展报告", "ESG报告", "社会责任报告", "绿色债券", "环境信息"]
+            "可持续发展报告", "ESG报告", "社会责任报告", "绿色债券", "环境信息",
+            # —— 英文 / 外网同义词（拓宽国际视野，覆盖碳市场、脱碳、净零、生物多样性等一手动态）——
+            "carbon price", "EU ETS", "emissions trading", "decarboniz",
+            "net zero", "net-zero", "carbon accounting", "scope 3", "scope 1",
+            "biodiversity", "green finance"]
 
 # 关键词 -> 业务落点（自动建议，对应手册"角度库"）
 ANGLE_MAP = {
@@ -71,7 +78,7 @@ ANGLE_MAP = {
 
 # CBAM / 欧盟碳关税 专项雷达词（含英文，用于把"欧盟有关 CBAM 的最新更新"做成每日常驻内容）
 CBAM_PHRASES = ["CBAM", "碳关税", "碳边境调节机制", "碳边境", "欧盟碳关税",
-                "Carbon Border", "carbon border adjustment"]
+                "Carbon Border", "carbon border adjustment", "carbon border tax"]
 
 WINDOW_DAYS = 3  # 仅 RSS 源按近 N 天过滤；网页源默认取最新列表
 
@@ -252,7 +259,7 @@ def collect():
                 link = it["link"]
                 if link:
                     link = urljoin(url, link)
-                hits.append(_make(name, it["title"], link, matched))
+                hits.append(_make(name, it["title"], link, matched, extra=it["summary"]))
         else:  # html 栏目页
             for title, href in parse_html_anchors(raw):
                 matched = [k for k in KEYWORDS if k in title]
@@ -268,12 +275,16 @@ def collect():
         seen.add(h["title"]); uniq.append(h)
     return uniq
 
-def _make(src, title, link, matched):
+def _make(src, title, link, matched, extra=""):
     angle = "; ".join(ANGLE_MAP.get(k, "") for k in matched if k in ANGLE_MAP)
     # 标记为 CBAM 相关（用于每日常驻"欧盟碳关税专区" + 钩子优先）
-    cbam = any(p.lower() in title.lower() for p in CBAM_PHRASES)
+    # 标题+摘要一起匹配：避免漏掉"标题没写 CBAM、但正文/摘要提了"的国际资讯
+    blob = (title + " " + extra).lower()
+    cbam = any(p.lower() in blob for p in CBAM_PHRASES)
     return {"src": src, "title": title, "link": link, "kw": matched,
             "angle": angle, "cbam": cbam}
+
+
 # ---------- 企业微信推送 ----------
 def push_to_wecom(webhook, markdown):
     if not webhook:
@@ -358,21 +369,7 @@ def main():
     today = datetime.now().strftime("%Y-%m-%d")
     lines = [f"# 可持续发展资讯速览（{today}）", f"近 {WINDOW_DAYS} 天命中 {len(uniq)} 条\n"]
     md_parts = [f"**📌 可持续发展资讯速览（{today}）**", f"> 命中 {len(uniq)} 条\n"]
-    for h in uniq:
-        if h.get("cbam"):
-            continue  # CBAM 相关统一进下方"欧盟碳关税专区"，避免重复
-        line = f"- **[{h['src']}]** {h['title']}"
-        lines.append(line)
-        md_parts.append(f"> **[{h['src']}]** {h['title']}")
-        if h["angle"]:
-            lines.append(f"  业务落点：{h['angle']}")
-            md_parts.append(f"> 落点：{h['angle']}")
-        if h["link"]:
-            lines.append(f"  链接：{h['link']}")
-            md_parts.append(f"> {h['link']}")
-        lines.append(""); md_parts.append("")
-
-    # —— CBAM / 欧盟碳关税 每日常驻专区（无更新也显示，告知持续监测）——
+    # —— CBAM / 欧盟碳关税 每日常驻专区（置顶优先，确保不被 4096 字节截断丢）——
     cbam_hits = [h for h in uniq if h.get("cbam")]
     md_parts.append("> **🌍 CBAM / 欧盟碳关税专区（每日常驻）**")
     lines.append("\n🌍 CBAM / 欧盟碳关税专区（每日常驻）")
@@ -388,6 +385,20 @@ def main():
         md_parts.append("> （今日无新增欧盟 CBAM 更新，持续监测中）")
         lines.append("- 今日无新增，持续监测中")
     md_parts.append("")
+
+    for h in uniq:
+        if h.get("cbam"):
+            continue  # CBAM 相关已置顶单独成区，避免重复
+        line = f"- **[{h['src']}]** {h['title']}"
+        lines.append(line)
+        md_parts.append(f"> **[{h['src']}]** {h['title']}")
+        if h["angle"]:
+            lines.append(f"  业务落点：{h['angle']}")
+            md_parts.append(f"> 落点：{h['angle']}")
+        if h["link"]:
+            lines.append(f"  链接：{h['link']}")
+            md_parts.append(f"> {h['link']}")
+        lines.append(""); md_parts.append("")
 
     out = "\n".join(lines)
     print(out)
@@ -414,5 +425,3 @@ if __name__ == "__main__":
 # 4) 注意：企业微信消息可在个人微信里接收（微信→我→设置→通用→辅助功能→微信接收企业微信消息）
 # 5) 扩展开关：UNFCCC 等备选源在 SOURCES 里以注释形式保留；上市公司 ESG 公告已由
 #    巨潮网（cninfo）官方接口统一抓取（覆盖上交所/深交所/北交所）；命中条目也可再喂给大模型写视频钩子
-
-
